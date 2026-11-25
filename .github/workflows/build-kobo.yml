@@ -74,7 +74,9 @@ jobs:
 
           Built from $(git rev-parse --short HEAD) (unmodified KFMon source) with koxtoolchain kobo.tar.zst (sha256 $TC_SHA256)."
           if gh release view "build-$VERSION" >/dev/null 2>&1; then
+            # A re-run after a failed upload: finish the upload and publish the draft
             gh release upload "build-$VERSION" out/* --clobber
+            gh release edit "build-$VERSION" --draft=false
           else
             gh release create "build-$VERSION" out/* --title "KFMon $VERSION (Kobo)" --notes "$NOTES" --target "$(git rev-parse HEAD)"
           fi
