@@ -1,0 +1,80 @@
+# Builds the KFMon install package for Kobo devices running Nickel (KoboRoot.tgz)
+# and publishes it as a GitHub release. KFMon's own code is not modified.
+#
+# Start it: Actions tab -> "Build Kobo package" -> Run workflow,
+#           or push a tag (e.g. the author's v1.4.7 after syncing).
+# Output:   a release named after `git describe` (e.g. v1.4.6-191-gca31869) with
+#           KoboRoot.tgz, KFMon-<version>.zip, KFMon-Uninstaller.zip, SHA256SUMS.
+
+name: Build Kobo package
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed to create the release
+
+env:
+  # Kobo cross-compiler from KOReader's koxtoolchain. To update: pick a newer
+  # release, copy kobo.tar.zst's SHA-256 from the release page, change both lines.
+  TC_URL: https://github.com/koreader/koxtoolchain/releases/download/2026.08/kobo.tar.zst
+  TC_SHA256: 326dd2a2a5ca371073c4ebc783d578f93f4122d83c46b84ec85b9e3ed5ff2305
+  CROSS_TC: arm-kobo-linux-gnueabihf
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out KFMon with its bundled libraries
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0        # full history + tags: the version name comes from `git describe`
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y zstd zip
+
+      - name: Download and verify the Kobo toolchain
+        run: |
+          curl -fsSL -o kobo.tar.zst "$TC_URL"
+          echo "$TC_SHA256  kobo.tar.zst" | sha256sum -c
+          mkdir -p "$RUNNER_TEMP/tc"
+          tar --zstd -xf kobo.tar.zst -C "$RUNNER_TEMP/tc"
+          rm kobo.tar.zst
+          echo "$RUNNER_TEMP/tc/x-tools/$CROSS_TC/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          "$CROSS_TC-gcc" --version | head -1
+          make kobo CROSS_TC="$CROSS_TC" -j"$(nproc)"
+
+      - name: Check the programs are built for the Kobo (32-bit ARM)
+        run: |
+          for f in Release/kfmon Release/shim Release/kfmon-ipc FBInk/Release/fbink; do
+            file "$f" | tee /dev/stderr | grep -q 'ELF 32-bit LSB executable, ARM' || { echo "Not ARM: $f"; exit 1; }
+          done
+
+      - name: Collect files
+        id: collect
+        run: |
+          VERSION="$(git describe)"
+          mkdir out
+          cp Release/KoboRoot.tgz "Kobo/KFMon-$VERSION.zip" Kobo/KFMon-Uninstaller.zip out/
+          (cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.collect.outputs.version }}
+        run: |
+          NOTES="**Personal build. Official downloads: [MobileRead KFMon thread](https://www.mobileread.com/forums/showthread.php?t=274231).** Please don't report problems with this build to the KFMon author.
+
+          Built from $(git rev-parse --short HEAD) (unmodified KFMon source) with koxtoolchain kobo.tar.zst (sha256 $TC_SHA256)."
+          if gh release view "build-$VERSION" >/dev/null 2>&1; then
+            gh release upload "build-$VERSION" out/* --clobber
+          else
+            gh release create "build-$VERSION" out/* --title "KFMon $VERSION (Kobo)" --notes "$NOTES" --target "$(git rev-parse HEAD)"
+          fi
